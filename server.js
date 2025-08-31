@@ -1,81 +1,57 @@
-// server.js
-// Código completo do servidor (Node.js + Express + SQLite + Socket.io)
-import express from 'express';
-import compression from 'compression';
-import cors from 'cors';
-import { Server } from 'socket.io';
-import http from 'http';
-import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const express = require("express");
+const path = require("path");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server);
 
-app.use(cors());
-app.use(compression());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Banco de dados SQLite
-const db = new Database(path.join(__dirname, 'db.sqlite'));
-db.pragma('journal_mode = WAL');
-
-db.exec(`
-CREATE TABLE IF NOT EXISTS queues (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  slug TEXT UNIQUE,
-  last_number INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS tickets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  queue_id INTEGER NOT NULL,
-  number INTEGER NOT NULL,
-  priority INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending',
-  called_at TEXT,
-  finished_at TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(queue_id) REFERENCES queues(id)
-);
-CREATE TABLE IF NOT EXISTS counters (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  queue_id INTEGER NOT NULL,
-  current_ticket_id INTEGER,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(queue_id) REFERENCES queues(id),
-  FOREIGN KEY(current_ticket_id) REFERENCES tickets(id)
-);
-`);
-
-// Função de estado geral
-const getState = () => {
-  const queues = db.prepare('SELECT * FROM queues ORDER BY id').all();
-  const counters = db.prepare('SELECT * FROM counters ORDER BY id').all();
-  const lastCalled = db.prepare(`
-    SELECT t.*, q.name AS queue_name, c.name AS counter_name
-    FROM tickets t
-    LEFT JOIN queues q ON q.id = t.queue_id
-    LEFT JOIN counters c ON c.current_ticket_id = t.id
-    WHERE t.status IN ('called')
-    ORDER BY t.called_at DESC
-    LIMIT 20
-  `).all();
-  return { queues, counters, lastCalled };
-};
-
-const broadcast = () => io.emit('state:update', getState());
-
-// Rotas REST
-app.get('/api/state', (req, res) => res.json(getState()));
-
-// Inicia servidor
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor rodando em http://localhost:${PORT}`));
+
+// servir arquivos estáticos da pasta public
+app.use(express.static("public"));
+
+// rota raiz -> carrega a tela principal
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// ------------------------------
+// Lógica simples de filas
+let filas = {
+  geral: [],
+};
+let guiches = {};
+
+// Recepção emite senha
+app.get("/nova-senha/:fila", (req, res) => {
+  const fila = req.params.fila;
+  if (!filas[fila]) filas[fila] = [];
+  const senha = fila[0].toUpperCase() + (filas[fila].length + 1);
+  filas[fila].push(senha);
+  io.emit("atualizacao", { filas, guiches });
+  res.send({ senha });
+});
+
+// Atendente chama próximo
+app.get("/chamar/:fila/:guiche", (req, res) => {
+  const { fila, guiche } = req.params;
+  if (!filas[fila] || filas[fila].length === 0) {
+    return res.send({ mensagem: "Fila vazia" });
+  }
+  const senha = filas[fila].shift();
+  guiches[guiche] = senha;
+  io.emit("atualizacao", { filas, guiches });
+  res.send({ guiche, senha });
+});
+
+// Socket.io conexão
+io.on("connection", (socket) => {
+  console.log("Novo cliente conectado");
+  socket.emit("atualizacao", { filas, guiches });
+});
+
+server.listen(PORT, () => {
+  console.log(`Sistema de Atendimento rodando na porta ${PORT}`);
+});
